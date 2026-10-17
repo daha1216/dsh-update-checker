@@ -901,7 +901,7 @@ window.__ModuleLoader__.load({
 }
 .dsh-uc-btn-primary {
   background: var(--dsw-alias-brand-primary, #4c6ef5);
-  color: #ffffff;
+  color: var(--dsw-alias-label-primary-inverted, #ffffff);
   border-color: transparent;
   box-shadow: 0 1px 2px rgba(0,0,0,0.08);
 }
