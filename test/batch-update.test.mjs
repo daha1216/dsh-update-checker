@@ -85,7 +85,7 @@ const setClipboard = (value) => Object.defineProperty(globalThis, 'navigator', {
  * the new one when the workspace's startSession is called, mirroring the host
  * (creation is async, the binding lands a tick later).
  */
-function hostStub({ sessionActions, submitThrows = false } = {}) {
+function hostStub({ sessionActions, nativeDraft = false, reuseBlank = false } = {}) {
   const oldActions = actionsStub();
   const nextActions = sessionActions ?? actionsStub();
   const listeners = new Set();
@@ -103,8 +103,11 @@ function hostStub({ sessionActions, submitThrows = false } = {}) {
   const uiSession = { adapter: { current: source } };
   const uiWorkspace = {
     startSessionCalls: 0,
-    startSession() {
+    startSessionArgs: null,
+    startSession(workspaceId, options) {
       this.startSessionCalls += 1;
+      this.startSessionArgs = [workspaceId, options];
+      if (reuseBlank) return undefined;
       // The host mounts the new session asynchronously, so the binding only
       // flips after startSession() returns.
       setTimeout(() => {
@@ -114,12 +117,19 @@ function hostStub({ sessionActions, submitThrows = false } = {}) {
       return Promise.resolve();
     },
   };
+  // rc.3 hosts ship the draft API the plugin prefers; older ones do not.
+  const conversation = nativeDraft
+    ? { input: { requestDraftInitialization: () => 'applied' } }
+    : undefined;
   return {
-    ctx: { get: (name) => (name === 'uiSession' ? uiSession : name === 'uiWorkspace' ? uiWorkspace : undefined) },
+    ctx: {
+      get: (name) => (name === 'uiSession' ? uiSession
+        : name === 'uiWorkspace' ? uiWorkspace
+          : name === 'conversation' ? conversation : undefined),
+    },
     oldActions,
     nextActions,
     uiWorkspace,
-    submitThrows,
   };
 }
 
@@ -135,6 +145,46 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await wait(10);
   check('draft lands in the new session', host.nextActions.calls[0]?.[0] === 'setDraft' && host.nextActions.calls[0]?.[1] === 'update them');
   check('batch handover never submits', !host.nextActions.calls.some((call) => call[0] === 'submit'), JSON.stringify(host.nextActions.calls));
+}
+
+// rc.3 hosts ship the draft API: one call does the whole job, and the host
+// reports its own failures through its notice channel.
+{
+  const host = hostStub({ nativeDraft: true });
+  setClipboard({ clipboard: { writeText: () => undefined } });
+  const outcome = draftInNewSession(host.ctx, 'update list');
+  check('native host: one startSession call', host.uiWorkspace.startSessionCalls === 1, `outcome=${outcome}`);
+  check('native host: reports session', outcome === 'session');
+  check('native host: passes the prompt as a draft option',
+    host.uiWorkspace.startSessionArgs?.[1]?.prompt === 'update list',
+    JSON.stringify(host.uiWorkspace.startSessionArgs));
+  check('native host: replaces any existing draft',
+    host.uiWorkspace.startSessionArgs?.[1]?.whenDraftExists === 'replace');
+  check('native host: leaves the workspace choice to the host',
+    host.uiWorkspace.startSessionArgs?.[0] === undefined);
+  await wait(20);
+  check('native host: no direct composer writes',
+    host.oldActions.calls.length === 0 && host.nextActions.calls.length === 0,
+    JSON.stringify([host.oldActions.calls, host.nextActions.calls]));
+  check('native host: never submits',
+    !host.nextActions.calls.some((call) => call[0] === 'submit'));
+}
+
+// The host opened the blank conversation it already had: the binding never
+// changes, so the draft has to land on the current one — waiting for a new key
+// is exactly what made 0.7.2 do nothing in this case.
+{
+  const host = hostStub({ reuseBlank: true });
+  setClipboard({});
+  const outcome = draftInNewSession(host.ctx, 'reused');
+  check('reused blank: reports session', outcome === 'session', `outcome=${outcome}`);
+  check('reused blank: nothing written before the grace period', host.oldActions.calls.length === 0);
+  await wait(600);
+  check('reused blank: draft lands in the reused conversation',
+    host.oldActions.calls[0]?.[0] === 'setDraft' && host.oldActions.calls[0]?.[1] === 'reused',
+    JSON.stringify(host.oldActions.calls));
+  check('reused blank: never submits',
+    !host.oldActions.calls.some((call) => call[0] === 'submit'));
 }
 
 // A host whose new session has no composer yet: the draft is still owed, and

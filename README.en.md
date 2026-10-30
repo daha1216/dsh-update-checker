@@ -199,6 +199,11 @@ npm run test:e2e
 
 ## 📝 Changelog
 
+### v0.7.3 (2026-10-30)
+- **"Update all" now really opens a new conversation on 0.2.1-rc.3 hosts**: rc.3 `startSession` accepts draft options (`{ prompt }`, handed to `conversation.input.requestDraftInitialization` once the conversation mounts). The plugin used to call `startSession()` and then wait for the main binding to switch to a *different* session before filling the draft — but "new session" may **reuse an existing blank conversation**, so the binding never changes, the wait never resolves, and ten seconds later the prompt landed in the clipboard while the panel had already closed. The plugin now uses the host draft API: one call opens the conversation, prefills it, and never sends. Failures are reported through the host's own notice channel.
+- **`whenDraftExists: 'replace'`**: one click, one outcome — new or reused blank conversation, the list is in the composer afterwards. On hosts that ignore the options argument the old self-fill path stays, now with a 500 ms grace period: if the binding did not change (a reused blank), the current composer is filled instead of waiting forever.
+- **Tests**: `test/batch-update.test.mjs` grows to 54 assertions, adding the native-draft path, its arguments and `whenDraftExists`, "the native path writes no composer directly", "a reused blank still receives the draft", and "neither path submits".
+
 ### Unreleased (security & robustness audit, 2026-10-27)
 - **Host crash containment**: every async path of the `node:http` → fetch bridge (reading the request body, fetching, writing the response, `waitForDrain`) now runs inside try/catch/finally; a client disconnect cancels the response body and stops writing, and 500s only say `update check failed` — no internal messages or absolute paths reach the renderer. New `test/host.test.mjs` covers this with real sockets.
 - **Loopback fence parses the Host header** instead of `split(':')`: `127.0.0.1:56185@evil.example` is no longer trusted, IPv6 `[::1]:56185` works again, and 127/8 aliases are accepted. The bridge builds its `Request` from a fixed internal origin plus the request path, so a malformed Host or an absolute-form request line can no longer throw.

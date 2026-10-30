@@ -205,6 +205,11 @@ npm run test:e2e
 
 ## 📝 更新日志
 
+### v0.7.3（2026-10-30）
+- **「一键更新」在 0.2.1-rc.3 宿主上真的会新建对话了**：rc.3 的 `startSession` 原生支持草稿（`{ prompt }`，经 `conversation.input.requestDraftInitialization` 落到新会话的输入框）。插件此前是自己调 `startSession()`，再等「主会话绑定换成另一个 session」才填草稿——但宿主新建会话时可能**复用已有的空白会话**，绑定不会变，这个等待永远不成立，10 秒后提示词被丢进剪贴板，而面板早已关闭，看起来就是点了没反应。现在优先走宿主原生草稿接口，一次调用完成「新建 + 预填 + 不发送」，失败也由宿主自己的通知通道报出来。
+- **`whenDraftExists: 'replace'`**：一次点击一个结果——不管会话是新建的还是复用的空白会话，点完输入框里就是那份清单。旧宿主忽略选项参数时退回自填路径，并加了 500 毫秒宽限期：绑定没变（即复用了空白会话）就填当前输入框，不再空等。
+- **测试**：`test/batch-update.test.mjs` 增至 54 项断言，新增「走原生草稿接口」「参数与 `whenDraftExists` 正确」「原生路径不直接写 composer」「复用空白会话时草稿落到当前会话」「两条路径都不提交」等断言。
+
 ### 未发布（安全与健壮性巡检，2026-10-27）
 - **宿主进程不再可能被一次断连打崩**：`node:http` → fetch 桥的全部异步路径（读请求体、fetch、写响应、`waitForDrain`）现在收敛在一个 try/catch/finally 里；客户端在响应中途断开时取消响应体并停止写，500 响应只回 `update check failed`，不再把内部错误文本或绝对路径带回渲染层。新增 `test/host.test.mjs` 用真实 socket 覆盖超大请求、断连与抛错。
 - **loopback 栅栏改为解析 Host 而不是 `split(':')`**：`127.0.0.1:56185@evil.example` 这类 userinfo 前缀不再被当作回环，IPv6 `[::1]:56185` 恢复正常；Origin 比较走规范化 authority。

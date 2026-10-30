@@ -721,25 +721,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Start a fresh conversation and leave the text in its composer, unsent.
+     * Open a new conversation with the text sitting in its composer, unsent.
      *
-     * `uiWorkspace.startSession()` only kicks off creation: the new session is
-     * mounted asynchronously, so the composer that can take the draft does not
-     * exist yet when it returns. We therefore watch the main binding until it
-     * points at a different session that has input actions, then fill it.
+     * The host owns this operation: `startSession(workspaceId, options)` takes
+     * draft options and, once the conversation is mounted, hands them to
+     * `conversation.input.requestDraftInitialization`. Doing it host-side also
+     * covers a case an outside observer cannot see: "new session" may *reuse* an
+     * existing blank conversation, so waiting for a different main binding never
+     * resolves and the draft never appears.
      *
-     * Returns 'session' when a new conversation was started (the draft lands as
-     * soon as its composer mounts), and falls back to the current composer, the
-     * clipboard, or nothing when no new conversation can be started.
+     * `whenDraftExists: 'replace'` keeps one click one outcome: the list is in
+     * the box afterwards, whether the conversation is new or a reused blank.
+     *
+     * Returns 'session' when the conversation was opened (the host fills it),
+     * or 'draft' / 'clipboard' / 'none' from the older-host fallback paths.
      */
     function draftInNewSession(ctx, text) {
       const navigation = resolveWorkspaceNavigation(ctx);
-      const source = resolveUiSession(ctx)?.adapter?.current;
       const start = navigation?.startSession;
-      if (typeof start !== 'function' || typeof source?.getSnapshot !== 'function') {
-        return fillComposerDraft(ctx, text);
+      if (typeof start !== 'function') return fillComposerDraft(ctx, text);
+
+      let conversation;
+      try {
+        conversation = typeof ctx.get === 'function' ? ctx.get('conversation') : undefined;
+      } catch {
+        conversation = undefined;
+      }
+      // Host-side draft initialization: one call, no binding watching, and the
+      // host itself reports failures through its own notice channel.
+      if (typeof conversation?.input?.requestDraftInitialization === 'function') {
+        try {
+          start.call(navigation, undefined, { prompt: text, whenDraftExists: 'replace' });
+          return 'session';
+        } catch (error) {
+          ctx?.logger?.warn?.('dsh-update-checker: startSession with draft failed', error);
+          return fillComposerDraft(ctx, text);
+        }
+      }
+
+      // Older host: no draft option, so open the conversation and fill the
+      // composer ourselves once the binding settles on it.
+      const source = resolveUiSession(ctx)?.adapter?.current;
+      if (typeof source?.getSnapshot !== 'function') {
+        try {
+          start.call(navigation, undefined);
+        } catch (error) {
+          ctx?.logger?.warn?.('dsh-update-checker: startSession failed', error);
+          return fillComposerDraft(ctx, text);
+        }
+        return 'session';
       }
       const before = source.getSnapshot()?.key;
+      let reusedBlank = false;
+      let graceTimer = null;
       let settledOutcome = null;
       let unsubscribe = null;
       let timer = null;
@@ -751,6 +785,7 @@ window.__ModuleLoader__.load({
         unsubscribe = null;
         try { off?.(); } catch { /* already gone */ }
         if (timer !== null) { clearTimeout(timer); timer = null; }
+        if (graceTimer !== null) { clearTimeout(graceTimer); graceTimer = null; }
         return outcome;
       };
       // The caller already told the user "new conversation + draft". If the
@@ -758,11 +793,14 @@ window.__ModuleLoader__.load({
       // than dropping it silently.
       const salvage = () => fillComposerDraft(ctx, text);
       // The new session's binding carries its own input actions; the old one's
-      // must not be reused, or the draft would land in the previous chat.
+      // must not be reused, or the draft would land in the previous chat. The
+      // exception is `reusedBlank`: the host opened the blank conversation it
+      // already had, so the current binding *is* the new conversation.
       const fillIfReady = () => {
         if (settledOutcome !== null || filling) return true;
         const snapshot = source.getSnapshot?.();
-        if (!snapshot || snapshot.key === before) return false;
+        if (!snapshot) return false;
+        if (snapshot.key === before && !reusedBlank) return false;
         const actions = snapshot.props?.inputActions;
         if (!actions || typeof actions.setDraft !== 'function') return false;
         // A store may notify subscribers synchronously from setDraft; the
@@ -811,6 +849,16 @@ window.__ModuleLoader__.load({
         return settledOutcome;
       }
       if (fillIfReady()) return settledOutcome ?? 'session';
+      // The host may have opened the blank conversation it already had instead
+      // of creating one; no binding change will ever arrive in that case, so
+      // after a short grace period the current binding counts as the target.
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        if (settledOutcome !== null) return;
+        reusedBlank = true;
+        fillIfReady();
+      }, 500);
+      graceTimer.unref?.();
       timer = setTimeout(() => {
         if (settledOutcome !== null) return;
         const copied = copyToClipboard(text);
